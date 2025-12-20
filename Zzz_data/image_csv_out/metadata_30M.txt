@@ -1,0 +1,8 @@
+resolution_deg=4.381e-05
+px_min_abs=243233
+py_min_abs=2432778
+px_max_abs=248710
+py_max_abs=2438255
+height_pixels=5478
+width_pixels=5478
+nonzero_pixels=2999
