@@ -17,37 +17,48 @@ def split_tokens(s: str):
     # tách theo khoảng trắng (nhiều space ok)
     return re.split(r"\s+", s)
 
-def build_id_to_cell(customers_csv: str):
+def build_id_to_cell(grid_dir: str):
     """
-    Build mapping from customer_id_idx (or customer_id) -> (row, col).
-    Handles "cell contains multiple customers": split by space.
+    Build mapping from customer_id -> (row, col).
+    Uses customer_id_map.csv to get customer_id, and customers_sparse_grid.csv for coordinates.
     """
-    df = pd.read_csv(customers_csv)
-
-    # cố gắng đoán tên cột row/col
-    # (bạn đang dùng row,col trong pipeline)
-    if "row" not in df.columns or "col" not in df.columns:
-        raise ValueError(f"customers file must have columns row,col. Found: {list(df.columns)}")
-
-    # ưu tiên customer_id_idx, fallback customer_id
-    id_col = None
-    if "customer_id_idx" in df.columns:
-        id_col = "customer_id_idx"
-    elif "customer_idx" in df.columns:
-        id_col = "customer_idx"
-    elif "customer_id" in df.columns:
-        id_col = "customer_id"
-    else:
-        raise ValueError(f"customers file must have customer_id_idx or customer_id. Found: {list(df.columns)}")
-
-    id_to_rc = {}
-    for _, r in df.iterrows():
+    # Load customer_id_map.csv to get customer_id -> customer_id_idx mapping
+    id_map_csv = os.path.join(grid_dir, "customer_id_map.csv")
+    sparse_csv = os.path.join(grid_dir, "customers_sparse_grid.csv")
+    
+    id_map_df = pd.read_csv(id_map_csv)
+    sparse_df = pd.read_csv(sparse_csv)
+    
+    # Lowercase all column names for consistency
+    id_map_df.columns = [c.lower() for c in id_map_df.columns]
+    sparse_df.columns = [c.lower() for c in sparse_df.columns]
+    
+    # Build idx -> (row, col) from sparse_grid
+    # Each row in sparse_grid has customer_id_idx which may contain multiple space-separated indices
+    idx_to_rc = {}
+    for _, r in sparse_df.iterrows():
         rr = int(r["row"])
         cc = int(r["col"])
-        tokens = split_tokens(r[id_col])
-        for t in tokens:
-            # nếu trùng id, giữ cái đầu tiên (thường không xảy ra)
-            id_to_rc.setdefault(t, (rr, cc))
+        if "customer_id_idx" in r:
+            tokens = split_tokens(r["customer_id_idx"])
+            for t in tokens:
+                try:
+                    idx = int(t)
+                    idx_to_rc[idx] = (rr, cc)
+                except:
+                    pass
+    
+    # Build customer_id -> (row, col) using id_map
+    id_to_rc = {}
+    for _, r in id_map_df.iterrows():
+        cust_id = str(r.get("customer_id", "")).strip()
+        try:
+            idx = int(r.get("customer_id_idx", -1))
+        except:
+            continue
+        if idx in idx_to_rc and cust_id:
+            id_to_rc[cust_id] = idx_to_rc[idx]
+    
     return id_to_rc
 
 def load_depots(depots_csv: str):
@@ -112,7 +123,7 @@ def main():
     assign_csv = os.path.join(args.grid_out, args.assign)
     out_png = os.path.join(args.grid_out, args.out_png) if not os.path.isabs(args.out_png) else args.out_png
 
-    id_to_rc = build_id_to_cell(customers_csv)
+    id_to_rc = build_id_to_cell(args.grid_out)
     depots = load_depots(depots_csv)
     asg = read_assignment(assign_csv)
 

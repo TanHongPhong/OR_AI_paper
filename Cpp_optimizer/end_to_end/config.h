@@ -1,27 +1,114 @@
 #pragma once
 
-#define _USE_MATH_DEFINES
+// ==========================================
+//  Cluster-trip last-mile (GRID-TENSOR edition)
+//
+//  RAM data layout (as requested):
+//   1) CustomerTensor: dense tensor [H, W, 4]
+//        ch0 = weight
+//        ch1 = volume
+//        ch2 = priority
+//        ch3 = idx (stored as float, but represents integer)
+//   2) Depot / Vehicle / Road: table structures loaded from the original CSVs
+//   3) CustomerIdMap: mapping table (like customer_id_map.csv) extended with
+//        cluster / vehicle / depot fields during init/optimizer.
+//
+//  Notes:
+//   - CustomerTensor is a *true numeric tensor*.
+//   - IDs (strings) live in CustomerIdMap / Depot / Vehicle / Road, not inside the tensor.
+// ==========================================
+
 #include <string>
 #include <vector>
 #include <map>
-#include <set>
 #include <unordered_map>
-#include <iostream>
+#include <set>
 #include <cmath>
 #include <algorithm>
+#include <stdexcept>
 
-// ===============================
-//  MODEL: Cluster-trip last-mile
-//  - Each vehicle k belongs to exactly one depot (K_d)
-//  - Each trip/cluster t of vehicle k: depot -> center(customer) -> depot
-//  - Total km of a vehicle is sum of all trips' round-trip distances
-//  - No time windows / service time in objective
-// ===============================
+namespace gridopt {
 
 using std::string;
 using std::vector;
 using std::map;
 using std::set;
+
+// -------- Customer tensor channels --------
+static constexpr int CUST_CH_W   = 0;
+static constexpr int CUST_CH_VOL = 1;
+static constexpr int CUST_CH_PRI = 2;
+static constexpr int CUST_CH_IDX = 3;
+static constexpr int CUST_CH     = 4;
+
+// ==========================================
+// CustomerTensor: dense [H, W, 4] float tensor
+// ==========================================
+struct CustomerTensor {
+    int H = 0;
+    int W = 0;
+    // Layout: ((r*W + c)*4 + k)
+    vector<float> data;
+
+    CustomerTensor() = default;
+    CustomerTensor(int h, int w) { resize(h, w); }
+
+    void resize(int h, int w) {
+        if (h < 0 || w < 0) throw std::runtime_error("CustomerTensor::resize: negative dims");
+        H = h; W = w;
+        data.assign((size_t)H * (size_t)W * (size_t)CUST_CH, 0.0f);
+        // idx channel default = -1 to mark empty
+        for (int r = 0; r < H; ++r) {
+            for (int c = 0; c < W; ++c) {
+                at(r, c, CUST_CH_IDX) = -1.0f;
+            }
+        }
+    }
+
+    inline bool in_bounds(int r, int c) const {
+        return (r >= 0 && r < H && c >= 0 && c < W);
+    }
+
+    inline size_t off(int r, int c, int k) const {
+        return ((size_t)r * (size_t)W + (size_t)c) * (size_t)CUST_CH + (size_t)k;
+    }
+
+    inline float& at(int r, int c, int k) {
+        return data[off(r, c, k)];
+    }
+
+    inline const float& at(int r, int c, int k) const {
+        return data[off(r, c, k)];
+    }
+
+    inline bool occupied(int r, int c) const {
+        return at(r, c, CUST_CH_IDX) >= 0.0f;
+    }
+
+    inline int idx_int(int r, int c) const {
+        // idx stored as float but represents integer
+        return (int)at(r, c, CUST_CH_IDX);
+    }
+
+    inline int linear(int r, int c) const {
+        return r * W + c;
+    }
+
+    inline void decode_linear(int linear_idx, int &r, int &c) const {
+        r = linear_idx / W;
+        c = linear_idx % W;
+    }
+};
+
+// ==========================================
+// Depots / Vehicles / Roads (tables)
+// ==========================================
+struct Depot {
+    string id;
+    int row = 0;
+    int col = 0;
+    double cap_weight_storage = 0.0;
+};
 
 enum class VehicleType { VAN, EV_VAN, MOTORBIKE, BIKE, CARGO_TRIKE, UNKNOWN };
 
@@ -35,70 +122,11 @@ inline VehicleType parse_vehicle_type(string s) {
     return VehicleType::UNKNOWN;
 }
 
-inline int type_rank(VehicleType t) {
-    // smaller = smaller vehicle
-    switch (t) {
-        case VehicleType::BIKE: return 0;
-        case VehicleType::MOTORBIKE:
-        case VehicleType::CARGO_TRIKE: return 1;
-        case VehicleType::EV_VAN: return 2;
-        case VehicleType::VAN: return 3;
-        default: return 99;
-    }
-}
-
-inline double spread_limit_km(VehicleType t) {
-    // RELAXED: Doubled limits for better coverage of scattered customers
-    //  Van, EV Van: < 10km (was 5km)
-    //  Motorbike (+ Cargo Trike): < 4km (was 2km)
-    //  Bike: < 2km (was 1km)
-    switch (t) {
-        case VehicleType::VAN:
-        case VehicleType::EV_VAN: return 10.0;  // DOUBLED
-        case VehicleType::MOTORBIKE:
-        case VehicleType::CARGO_TRIKE: return 4.0;  // DOUBLED
-        case VehicleType::BIKE: return 2.0;  // DOUBLED
-        default: return 4.0;
-    }
-}
-
-struct Customer {
-    string id;
-    double lat = 0.0;
-    double lon = 0.0;
-
-    // planar km coords for fast neighbor queries/visualize
-    double x_km = 0.0;
-    double y_km = 0.0;
-
-    double weight = 0.0;
-    double volume = 0.0;
-
-    // preprocessing tags
-    string territory_depot;          // which depot territory
-    VehicleType class_req = VehicleType::UNKNOWN; // quartile class
-    
-    // Grid coordinates for 8-neighbor
-    int row = 0;
-    int col = 0;
-};
-
-struct Depot {
-    string id;
-    double lat = 0.0;
-    double lon = 0.0;
-    double x_km = 0.0;
-    double y_km = 0.0;
-
-    // storage capacity (required)
-    double cap_weight_storage = 0.0;
-    double cap_volume_storage = 0.0; // optional, 0 => ignore
-};
-
 struct Vehicle {
     string id;
     VehicleType type = VehicleType::UNKNOWN;
     string vehicle_type;   // raw string
+
     double cap_weight = 0.0;
     double cap_volume = 0.0;
     double fixed_cost = 0.0;
@@ -113,33 +141,71 @@ struct Road {
     string from;
     string to;
     double distance_km = 0.0;
-    // We ignore time in objective; keep optional fields to leverage parameters.
+
+    // optional fields (not always used by objective)
     double travel_time_min = 0.0;
-    string traffic_level;       // Low/Medium/High
-    string restrictions;        // e.g., "No Heavy Trucks"
+    string traffic_level;
+    string restrictions;
     double velocity = 0.0;
 };
 
+// ==========================================
+// CustomerIdMap (extended during init/optimizer)
+// ==========================================
+struct CustomerIdMapRow {
+    int customer_idx = -1;     // key in customer_id_map.csv
+    string customer_id;        // original customer id
+
+    // Where this customer landed on the grid
+    int row = -1;
+    int col = -1;
+    int cell_linear = -1;      // row*W + col
+
+    // Filled/updated by init/optimizer
+    int cluster = -1;
+    string vehicle_id;
+    string depot_id;
+};
+
+struct CustomerIdMap {
+    // For convenience we keep a vector indexed by customer_idx when possible.
+    // If idx is sparse, we still store rows[idx] (after ensure_size).
+    vector<CustomerIdMapRow> rows;
+
+    // lookups
+    std::unordered_map<string, int> id_to_idx;
+    std::unordered_map<int, vector<int>> cell_to_customer_indices; // cell_linear -> list of customer_idx
+
+    inline void ensure_size(int n) {
+        if ((int)rows.size() < n) rows.resize((size_t)n);
+    }
+
+    inline bool has_idx(int idx) const {
+        return (idx >= 0 && idx < (int)rows.size() && rows[(size_t)idx].customer_idx == idx);
+    }
+};
+
+// ==========================================
+// Instance: all data needed by init + optimizer
+// ==========================================
 struct Instance {
-    map<string, Customer> customers;
-    map<string, Depot> depots;
+    // Grid customers
+    CustomerTensor customers;
+
+    // Tables
+    vector<Depot> depots;
     map<string, Vehicle> vehicles;
     vector<Road> roads;
 
-    // matrix[from][to] = distance_km
+    // Roads distance lookup
     map<string, map<string, double>> dist_km;
-    // optional edge attributes
     map<string, map<string, string>> edge_traffic;
     map<string, map<string, string>> edge_restrictions;
 
-    // traffic multiplier mapping (tune later)
-    double traffic_mult_low = 1.0;
-    double traffic_mult_medium = 1.05;
-    double traffic_mult_high = 1.12;
+    // customer idx mapping
+    CustomerIdMap id_map;
 
-    // reference latitude for projection
-    double ref_lat = 0.0;
-
+    // Build dist/attribute matrices from roads
     void build_dist_matrix() {
         dist_km.clear();
         edge_traffic.clear();
@@ -151,61 +217,8 @@ struct Instance {
         }
     }
 
-    inline string edge_traffic_level(const string& from, const string& to) const {
-        auto it1 = edge_traffic.find(from);
-        if (it1 != edge_traffic.end()) {
-            auto it2 = it1->second.find(to);
-            if (it2 != it1->second.end()) return it2->second;
-        }
-        return "";
-    }
-
-    inline string edge_restriction_text(const string& from, const string& to) const {
-        auto it1 = edge_restrictions.find(from);
-        if (it1 != edge_restrictions.end()) {
-            auto it2 = it1->second.find(to);
-            if (it2 != it1->second.end()) return it2->second;
-        }
-        return "";
-    }
-
-    inline bool edge_allowed(const string& from, const string& to, VehicleType t) const {
-        // If no restrictions -> allowed
-        string r = edge_restriction_text(from, to);
-        if (r.empty()) return true;
-        string rr = r;
-        for (auto &ch : rr) ch = (char)std::tolower((unsigned char)ch);
-        // Simple mapping: "No Heavy Trucks" disallows Van/EV Van
-        if (rr.find("no heavy") != string::npos || rr.find("heavy") != string::npos) {
-            if (t == VehicleType::VAN || t == VehicleType::EV_VAN) return false;
-        }
-        return true;
-    }
-
-    inline double traffic_multiplier(const string& level) const {
-        string s = level;
-        for (auto &ch : s) ch = (char)std::tolower((unsigned char)ch);
-        if (s.find("high") != string::npos) return traffic_mult_high;
-        if (s.find("medium") != string::npos) return traffic_mult_medium;
-        if (s.find("low") != string::npos) return traffic_mult_low;
-        return 1.0;
-    }
-
-    // Fallback distance if arc missing: haversine on lat/lon (km)
-    static double haversine_km(double lat1, double lon1, double lat2, double lon2) {
-        const double R = 6371.0;
-        auto deg2rad = [](double d) { return d * M_PI / 180.0; };
-        double dLat = deg2rad(lat2 - lat1);
-        double dLon = deg2rad(lon2 - lon1);
-        double a = std::sin(dLat/2)*std::sin(dLat/2) +
-                   std::cos(deg2rad(lat1))*std::cos(deg2rad(lat2)) *
-                   std::sin(dLon/2)*std::sin(dLon/2);
-        double c = 2.0 * std::atan2(std::sqrt(a), std::sqrt(1-a));
-        return R * c;
-    }
-
-    // Raw distance in km between nodes. Uses road matrix if available.
-    // If missing, falls back to haversine if both nodes have lat/lon.
+    // Distance between 2 nodes using the road table.
+    // (No fallback: if missing returns big number.)
     double get_dist_km(const string& from, const string& to) const {
         if (from == to) return 0.0;
         auto it1 = dist_km.find(from);
@@ -213,55 +226,33 @@ struct Instance {
             auto it2 = it1->second.find(to);
             if (it2 != it1->second.end()) return it2->second;
         }
-
-        // fallback using coordinates
-        auto get_coord = [&](const string& id, double &lat, double &lon)->bool {
-            auto itC = customers.find(id);
-            if (itC != customers.end()) { lat = itC->second.lat; lon = itC->second.lon; return true; }
-            auto itD = depots.find(id);
-            if (itD != depots.end()) { lat = itD->second.lat; lon = itD->second.lon; return true; }
-            return false;
-        };
-        double la1, lo1, la2, lo2;
-        if (get_coord(from, la1, lo1) && get_coord(to, la2, lo2)) {
-            return haversine_km(la1, lo1, la2, lo2);
-        }
         return 1e9;
     }
 };
 
+// ==========================================
+// Optional: route/solution schema (kept minimal)
+// ==========================================
 struct Route {
     string vehicle_id;
-    vector<string> stops; // [depot, centroid, depot]
-
-    string cluster_id;
-    string centroid_id;              // customer representative center
-    vector<string> cluster_customers;
+    int center_cell_linear = -1;      // center on grid
+    vector<int> member_cells_linear;  // members on grid
 
     double load_w = 0.0;
     double load_v = 0.0;
-    double distance = 0.0; // round-trip distance (km)
+
+    // objective may use road distance depot->center (computed elsewhere)
+    double distance_km = 0.0;
 };
 
 struct Solution {
-    // routes[vehicle_id] = list of trips/clusters
-    map<string, vector<Route>> routes;
-    double objective = 1e15;
+    map<string, vector<Route>> routes;  // routes[vehicle_id]
+    set<int> unassigned_cells;          // cell_linear ids not assigned
 
-    set<string> unassigned_customers;
-
-    // breakdown
-    double total_cost = 0.0;
+    double objective = 1e18;
     double fixed_cost = 0.0;
     double travel_cost = 0.0;
     double penalty = 0.0;
-
-    double penalty_unserved = 0.0;
-    double penalty_maxdist = 0.0;
-    double penalty_veh_cap = 0.0;
-    double penalty_depot_cap = 0.0;
-    double penalty_cluster_spread = 0.0;
-    double penalty_kd = 0.0;
-
-    double calculate_objective(const Instance& inst);
 };
+
+} // namespace gridopt
