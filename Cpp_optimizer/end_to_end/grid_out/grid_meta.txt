@@ -1,0 +1,12 @@
+cell_m=10.0
+cell_km=0.01
+ref_lat=10.773695056088934
+cos_ref=0.9823731754406333
+min_lat=10.656028
+min_lon=106.580021
+x_km_min=11655.354690355087
+y_km_min=1178.2370159599998
+width=2624
+height=2654
+customers=1974
+depots=5
