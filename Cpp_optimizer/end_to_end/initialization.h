@@ -43,6 +43,8 @@
 #include <unordered_set>
 #include <random>
 #include <iostream>
+#include <algorithm>
+#include <utility>
 
 namespace gridopt {
 
@@ -390,18 +392,33 @@ public:
                         if (rem_km <= 1e-9) break;
                         if (depot_rem_w[did] <= 1e-9) break;
 
-                        // ---- choose random seed inside territory (must be in territory) ----
-                        std::vector<int> seed_cands;
+                        // ---- choose seed: prioritize FARTHEST unassigned customers ----
+                        // This ensures large vehicles pick up far customers first
+                        // Add ±10% random noise for diversity while keeping farthest-first priority
+                        std::vector<std::pair<double, int>> seed_cands;  // (distance_noisy, cell)
                         seed_cands.reserve(256);
+                        std::uniform_real_distribution<double> noise_dist(0.9, 1.1);  // ±10%
                         for (int cell : territory_cells) {
-                            if (sol.unassigned_cells.count(cell)) seed_cands.push_back(cell);
+                            if (!sol.unassigned_cells.count(cell)) continue;
+                            std::string rep_cid = rep_customer_id_from_cell(inst, cell);
+                            if (rep_cid.empty()) continue;
+                            double dkm = inst.get_dist_km(did, rep_cid);
+                            if (dkm >= 1e8) continue;
+                            double dkm_noisy = dkm * noise_dist(rng);  // Add random noise
+                            seed_cands.push_back({dkm_noisy, cell});
                         }
                         if (seed_cands.empty()) break;
-                        std::shuffle(seed_cands.begin(), seed_cands.end(), rng);
+                        
+                        // Sort by noisy distance DESC (farthest first, with randomness)
+                        std::sort(seed_cands.begin(), seed_cands.end(),
+                                  [](const auto& a, const auto& b) { return a.first > b.first; });
 
                         int seed_cell = -1;
                         double seed_trip_km = 0.0;
-                        for (int cell : seed_cands) {
+                        for (const auto& sc : seed_cands) {
+                            const int cell = sc.second;
+                            const double dkm = sc.first;
+                            
                             // basic demand
                             const double w = cell_weight(inst, cell);
                             const double v = cell_volume(inst, cell);
@@ -410,12 +427,7 @@ public:
                             if (v > veh.cap_volume + 1e-9) continue;
                             if (depot_rem_w[did] < w - 1e-9) continue;
 
-                            std::string rep_cid = rep_customer_id_from_cell(inst, cell);
-                            if (rep_cid.empty()) continue;
-                            double dkm = inst.get_dist_km(did, rep_cid);
-                            if (dkm >= 1e8) continue;
-
-                            // optional class requirement by quartiles
+                            // quartile class requirement: this vehicle must be >= required type
                             VehicleType req = required_type_from_dist(dkm, depot_q[did]);
                             if (type_rank(veh.type) < type_rank(req)) continue;
 
