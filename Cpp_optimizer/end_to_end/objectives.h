@@ -123,6 +123,8 @@ struct Objectives {
             }
 
             // HARD CONSTRAINT 2: Duplicate cell assignment
+            // HARD CONSTRAINT 3: Vehicle capacity (weight)
+            // HARD CONSTRAINT 4: Vehicle capacity (volume)
             for (const Route& rt : kv.second) {
                 for (int cell : rt.member_cells_linear) {
                     if (assigned_cells.count(cell) > 0) {
@@ -131,6 +133,26 @@ struct Objectives {
                         return;  // Early reject
                     }
                     assigned_cells.insert(cell);
+                }
+                
+                // Check vehicle capacity constraints (HARD)
+                if (!rt.member_cells_linear.empty()) {
+                    double load_w = 0.0, load_v = 0.0;
+                    compute_route_load_tensor(inst, rt.member_cells_linear, load_w, load_v);
+                    
+                    // HARD CONSTRAINT 3: Vehicle weight capacity
+                    if (veh.cap_weight > 0.0 && load_w > veh.cap_weight + 1e-9) {
+                        // INFEASIBLE: route exceeds vehicle weight capacity
+                        sol.objective = 1e18;
+                        return;  // Early reject
+                    }
+                    
+                    // HARD CONSTRAINT 4: Vehicle volume capacity
+                    if (veh.cap_volume > 0.0 && load_v > veh.cap_volume + 1e-9) {
+                        // INFEASIBLE: route exceeds vehicle volume capacity
+                        sol.objective = 1e18;
+                        return;  // Early reject
+                    }
                 }
             }
         }
@@ -144,7 +166,6 @@ struct Objectives {
         for (const auto& kv : inst.vehicles) veh_total_km[kv.first] = 0.0;
 
         double pen_unserved = 0.0;
-        double pen_veh_cap = 0.0;
         double pen_depot_cap = 0.0;
         double pen_maxdist = 0.0;
 
@@ -183,17 +204,12 @@ struct Objectives {
                 sol.travel_cost += trip_km * veh.var_cost;
                 veh_total_km[vid] += trip_km;
 
-                // route load (from tensor)
+                // route load for depot storage tracking
                 double load_w = 0.0, load_v = 0.0;
                 compute_route_load_tensor(inst, rt.member_cells_linear, load_w, load_v);
 
-                // capacity constraints (soft)
-                if (veh.cap_weight > 0.0 && load_w > veh.cap_weight + 1e-9) {
-                    pen_veh_cap += (load_w - veh.cap_weight) * GRIDOPT_PEN_VEH_CAP;
-                }
-                if (veh.cap_volume > 0.0 && load_v > veh.cap_volume + 1e-9) {
-                    pen_veh_cap += (load_v - veh.cap_volume) * GRIDOPT_PEN_VEH_CAP;
-                }
+                // NOTE: Vehicle capacity constraints (weight/volume) are now HARD CONSTRAINTS
+                // checked in Phase 1 above. No penalty is applied here.
 
                 // depot storage (weight)
                 depot_w[depot_id] += load_w;
@@ -212,14 +228,15 @@ struct Objectives {
         }
 
         // -------- depot storage capacity (weight) --------
-        for (const auto& d : inst.depots) {
-            if (d.cap_weight_storage > 0.0) {
-                const double used = depot_w[d.id];
-                if (used > d.cap_weight_storage + 1e-9) {
-                    pen_depot_cap += (used - d.cap_weight_storage) * GRIDOPT_PEN_DEPOT_CAP;
-                }
-            }
-        }
+        // NOTE: Disabled - depot capacity is unlimited for this problem
+        // for (const auto& d : inst.depots) {
+        //     if (d.cap_weight_storage > 0.0) {
+        //         const double used = depot_w[d.id];
+        //         if (used > d.cap_weight_storage + 1e-9) {
+        //             pen_depot_cap += (used - d.cap_weight_storage) * GRIDOPT_PEN_DEPOT_CAP;
+        //         }
+        //     }
+        // }
 
         // -------- unserved occupied cells (sparse scan) --------
         sol.unassigned_cells.clear();
@@ -242,8 +259,113 @@ struct Objectives {
             pen_unserved += GRIDOPT_PEN_UNSERVED_BASE + GRIDOPT_PEN_UNSERVED_W * w + GRIDOPT_PEN_UNSERVED_V * v;
         }
 
-        sol.penalty = pen_unserved + pen_veh_cap + pen_depot_cap + pen_maxdist;  // No pen_kd/pen_duplicate - they are hard constraints
+        sol.penalty = pen_unserved + pen_depot_cap + pen_maxdist;  // NOTE: Vehicle capacity (weight/volume) are now HARD CONSTRAINTS, not penalized
         sol.objective = sol.fixed_cost + sol.travel_cost + sol.penalty;
+    }
+
+    // ========== Print penalty summary ==========
+    static void print_penalty_summary(const Instance& inst, const Solution& sol) {
+        std::cout << "\n============ PENALTY SUMMARY ============\n";
+        
+        // Count hard constraint violations
+        std::unordered_set<int> assigned_cells;
+        int hard_kd = 0, hard_dup = 0, hard_w = 0, hard_v = 0;
+        
+        for (const auto& kv : sol.routes) {
+            auto itV = inst.vehicles.find(kv.first);
+            if (itV == inst.vehicles.end()) continue;
+            const Vehicle& veh = itV->second;
+            
+            if (!veh.end_depot.empty() && veh.end_depot != veh.start_depot) hard_kd++;
+            
+            for (const Route& rt : kv.second) {
+                for (int cell : rt.member_cells_linear) {
+                    if (assigned_cells.count(cell) > 0) hard_dup++;
+                    assigned_cells.insert(cell);
+                }
+                if (!rt.member_cells_linear.empty()) {
+                    double lw = 0, lv = 0;
+                    compute_route_load_tensor(inst, rt.member_cells_linear, lw, lv);
+                    if (veh.cap_weight > 0 && lw > veh.cap_weight + 1e-9) hard_w++;
+                    if (veh.cap_volume > 0 && lv > veh.cap_volume + 1e-9) hard_v++;
+                }
+            }
+        }
+        
+        // Calculate soft penalties
+        std::unordered_map<std::string, double> depot_w, veh_km;
+        for (const auto& d : inst.depots) depot_w[d.id] = 0.0;
+        for (const auto& kv : inst.vehicles) veh_km[kv.first] = 0.0;
+        
+        double pen_unserved = 0, pen_maxdist = 0, pen_depot = 0;
+        int unserved_cnt = 0, maxdist_viols = 0, depot_viols = 0;
+        
+        for (const auto& kv : sol.routes) {
+            auto itV = inst.vehicles.find(kv.first);
+            if (itV == inst.vehicles.end()) continue;
+            const Vehicle& veh = itV->second;
+            for (const Route& rt : kv.second) {
+                if (rt.member_cells_linear.empty()) continue;
+                std::string cid;
+                if (rep_customer_id_from_cell(inst, rt.center_cell_linear, cid)) {
+                    double d = inst.get_dist_km(veh.start_depot, cid);
+                    if (d < 1e8) veh_km[kv.first] += 2.0 * d;
+                }
+                double lw = 0, lv = 0;
+                compute_route_load_tensor(inst, rt.member_cells_linear, lw, lv);
+                depot_w[veh.start_depot] += lw;
+            }
+        }
+        
+        for (const auto& kv : veh_km) {
+            auto itV = inst.vehicles.find(kv.first);
+            if (itV == inst.vehicles.end()) continue;
+            if (itV->second.max_dist > 0 && kv.second > itV->second.max_dist + 1e-9) {
+                pen_maxdist += (kv.second - itV->second.max_dist) * GRIDOPT_PEN_MAXDIST;
+                maxdist_viols++;
+            }
+        }
+        
+        // NOTE: Disabled - depot capacity is unlimited
+        // for (const auto& d : inst.depots) {
+        //     if (d.cap_weight_storage > 0 && depot_w[d.id] > d.cap_weight_storage + 1e-9) {
+        //         pen_depot += (depot_w[d.id] - d.cap_weight_storage) * GRIDOPT_PEN_DEPOT_CAP;
+        //         depot_viols++;
+        //     }
+        // }
+        
+        for (const auto& kv : inst.id_map.cell_to_customer_indices) {
+            if (assigned_cells.count(kv.first) == 0) {
+                unserved_cnt++;
+                int r, c; inst.customers.decode_linear(kv.first, r, c);
+                if (inst.customers.in_bounds(r, c) && inst.customers.occupied(r, c)) {
+                    double w = inst.customers.at(r, c, CUST_CH_W);
+                    double v = inst.customers.at(r, c, CUST_CH_VOL);
+                    pen_unserved += GRIDOPT_PEN_UNSERVED_BASE + GRIDOPT_PEN_UNSERVED_W * w + GRIDOPT_PEN_UNSERVED_V * v;
+                }
+            }
+        }
+        
+        // Print summary table
+        std::cout << std::fixed << std::setprecision(2);
+        std::cout << "\n[HARD CONSTRAINTS] (must be 0)\n";
+        std::cout << "  K_d (depot return):     " << hard_kd << "\n";
+        std::cout << "  Duplicate cells:        " << hard_dup << "\n";
+        std::cout << "  Weight capacity:        " << hard_w << "\n";
+        std::cout << "  Volume capacity:        " << hard_v << "\n";
+        
+        std::cout << "\n[SOFT CONSTRAINTS]\n";
+        std::cout << "  Unserved cells:         " << unserved_cnt << " -> pen=" << pen_unserved << "\n";
+        std::cout << "  Max distance viols:     " << maxdist_viols << " -> pen=" << pen_maxdist << "\n";
+        std::cout << "  Depot capacity viols:   " << depot_viols << " -> pen=" << pen_depot << "\n";
+        
+        double total_pen = pen_unserved + pen_maxdist + pen_depot;
+        std::cout << "\n[TOTALS]\n";
+        std::cout << "  Fixed cost:     " << sol.fixed_cost << "\n";
+        std::cout << "  Travel cost:    " << sol.travel_cost << "\n";
+        std::cout << "  Total penalty:  " << total_pen << "\n";
+        std::cout << "  OBJECTIVE:      " << sol.objective << "\n";
+        std::cout << "=========================================\n";
     }
 };
 
