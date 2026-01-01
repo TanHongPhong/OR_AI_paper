@@ -149,28 +149,32 @@ def boundary_loops_from_cells(cells):
 def load_depots(depots_csv: str):
     df = pd.read_csv(depots_csv)
     did_col = "Depot_ID" if "Depot_ID" in df.columns else "depot_id"
-    depots = []
+    depots = {}
     for _, r in df.iterrows():
-        depots.append({"id": str(r[did_col]), "row": int(r["row"]), "col": int(r["col"])})
+        depots[str(r[did_col])] = {"id": str(r[did_col]), "row": int(r["row"]), "col": int(r["col"])}
     return depots
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--grid_out", required=True, help="Folder containing input and output CSVs")
+    ap.add_argument("--grid_out", required=True, help="Folder containing output CSVs (routes, summary)")
+    ap.add_argument("--data_dir", default="", help="Folder containing static grid data (customers, depots). Defaults to grid_out if empty.")
     ap.add_argument("--routes", default="alns_routes.csv", help="Route details (trip-based)")
     ap.add_argument("--summary", default="alns_summary.csv", help="Summary stats")
     ap.add_argument("--out_png", default="viz_clusters_v4.png")
-    ap.add_argument("--s", type=float, default=4.0, help="Customer marker size")
-    ap.add_argument("--show_hull", action="store_true", help="Draw convex hull boundaries")
+    ap.add_argument("--s", type=float, default=8.0, help="Customer marker size")
+    ap.add_argument("--show_hull", action="store_true", default=True, help="Draw convex hull boundaries")
     ap.add_argument("--no_cover", action="store_true", help="Disable filled boundary cover per cluster")
     ap.add_argument("--invert_y", action="store_true", default=True, help="Invert Y axis")
+    ap.add_argument("--show_links", action="store_true", default=True, help="Draw lines from centers to depots")
     args = ap.parse_args()
 
-    sparse_csv = os.path.join(args.grid_out, "customers_sparse_grid.csv")
-    depots_csv = os.path.join(args.grid_out, "depots_grid_min.csv")
+    data_dir = args.data_dir if args.data_dir else args.grid_out
+
+    sparse_csv = os.path.join(data_dir, "customers_sparse_grid.csv")
+    depots_csv = os.path.join(data_dir, "depots_grid_min.csv")
+    meta_txt = os.path.join(data_dir, "grid_meta.txt")
     routes_csv = os.path.join(args.grid_out, args.routes)
     summary_csv = os.path.join(args.grid_out, args.summary)
-    meta_txt = os.path.join(args.grid_out, "grid_meta.txt")
     out_png = os.path.join(args.grid_out, args.out_png)
 
     sparse_df = pd.read_csv(sparse_csv)
@@ -207,7 +211,9 @@ def main():
     ax.scatter(sparse_df["col"], sparse_df["row"], c='#e0e0e0', s=args.s, alpha=0.2,
                marker='s', label="Customer (unassigned)", zorder=1)
 
-    centers_x, centers_y = [], []
+    # Store center info for drawing links later
+    center_depot_links = []  # [(cx, cy, depot_id, color)]
+    
     for i, rt in enumerate(routes):
         tokens = split_tokens(str(rt.get("member_cells", "")))
         pts = []
@@ -224,7 +230,7 @@ def main():
         pts = np.asarray(pts, dtype=float)
         color = cmap(i)
 
-        # --- Boundary cover + explicit outline (this is the NEW part) ---
+        # --- Boundary cover + explicit outline ---
         if not args.no_cover:
             loops = boundary_loops_from_cells([(p[0], p[1]) for p in pts])
             for lp in loops:
@@ -232,7 +238,7 @@ def main():
                 ys = [p[1] for p in lp] + [lp[0][1]]
 
                 # fill
-                fc = (color[0], color[1], color[2], 0.10)
+                fc = (color[0], color[1], color[2], 0.15)
                 ax.add_patch(Polygon(lp, closed=True, facecolor=fc, edgecolor='none', zorder=2.1))
 
                 # outline with a white underlay for contrast
@@ -240,37 +246,48 @@ def main():
                 ec = (color[0], color[1], color[2], 0.98)
                 ax.plot(xs, ys, color=ec, linewidth=2.2, alpha=0.98, zorder=7)
 
-        # Cluster markers (unchanged)
+        # Cluster customer markers - ensure visible
         ax.scatter(pts[:, 0], pts[:, 1], color=color, s=args.s, marker='s',
-                   edgecolors='none', alpha=0.9, zorder=3)
+                   edgecolors='white', linewidths=0.3, alpha=0.95, zorder=4)
 
-        # Centers
+        # Draw cluster center - more prominent diamond marker
         if "center_col" in rt and "center_row" in rt:
-            centers_x.append(rt["center_col"])
-            centers_y.append(rt["center_row"])
+            cx, cy = rt["center_col"], rt["center_row"]
+            if pd.notna(cx) and pd.notna(cy) and cx >= 0 and cy >= 0:
+                # Draw prominent diamond for cluster center
+                ax.scatter([cx], [cy], color=color, s=80, marker='D',
+                           edgecolors='black', linewidths=1.5, zorder=8)
+                # Store for depot link
+                depot_id = rt.get("depot_id", "")
+                if depot_id:
+                    center_depot_links.append((cx, cy, depot_id, color))
 
-        # Hull optional (unchanged)
+        # Hull optional
         if args.show_hull and len(pts) >= 3:
             try:
                 hull = ConvexHull(pts)
                 hull_pts = np.vstack([pts[hull.vertices], pts[hull.vertices[0]]])
-                ax.fill(hull_pts[:, 0], hull_pts[:, 1], color=color, alpha=0.1, zorder=2)
-                ax.plot(hull_pts[:, 0], hull_pts[:, 1], color=color, linewidth=1, alpha=0.4, zorder=2)
+                ax.fill(hull_pts[:, 0], hull_pts[:, 1], color=color, alpha=0.08, zorder=2)
+                ax.plot(hull_pts[:, 0], hull_pts[:, 1], color=color, linewidth=1.5, alpha=0.6, zorder=2)
             except:
                 pass
 
-    # Route centers
-    if centers_x and centers_y:
-        ax.scatter(centers_x, centers_y, c='black', s=12, marker='o',
-                   edgecolors='white', linewidths=0.5, label="Route Center", zorder=5)
+    # Draw lines from cluster centers to their depots
+    if args.show_links:
+        for cx, cy, depot_id, color in center_depot_links:
+            if depot_id in depots:
+                d = depots[depot_id]
+                dx, dy = d["col"], d["row"]
+                ax.plot([cx, dx], [cy, dy], color=color, linewidth=1.2, alpha=0.5, 
+                        linestyle='--', zorder=3)
 
-    # Depots (unchanged)
-    for d in depots:
-        ax.scatter(d["col"], d["row"], marker="*", s=300, c='red',
-                   edgecolors="black", linewidths=1.5, label="Depot", zorder=10)
-        ax.annotate(d["id"], (d["col"], d["row"]), fontsize=9, fontweight='bold',
-                    xytext=(5, 5), textcoords='offset points',
-                    bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8, edgecolor='grey'))
+    # Depots - draw on top
+    for depot_id, d in depots.items():
+        ax.scatter(d["col"], d["row"], marker="*", s=400, c='red',
+                   edgecolors="black", linewidths=2.0, zorder=15)
+        ax.annotate(d["id"], (d["col"], d["row"]), fontsize=10, fontweight='bold',
+                    xytext=(8, 8), textcoords='offset points',
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.9, edgecolor='black'))
 
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("col", fontsize=11)
@@ -280,12 +297,13 @@ def main():
         ax.invert_yaxis()
 
     legend_elements = [
-        Line2D([0], [0], marker='s', color='w', label='Customer (by cluster)', markerfacecolor='blue', markersize=8),
-        Line2D([0], [0], marker='o', color='w', label='Route Center', markerfacecolor='black', markeredgecolor='white', markersize=8),
-        Line2D([0], [0], marker='*', color='w', label='Depot', markerfacecolor='red', markeredgecolor='black', markersize=12),
-        Line2D([0], [0], marker='x', color='w', label='Unassigned', markerfacecolor='grey', markeredgecolor='grey', markersize=8),
+        Line2D([0], [0], marker='s', color='w', label='Customer (by cluster)', markerfacecolor='blue', markersize=10, markeredgecolor='white'),
+        Line2D([0], [0], marker='D', color='w', label='Cluster Center', markerfacecolor='green', markeredgecolor='black', markersize=10),
+        Line2D([0], [0], marker='*', color='w', label='Depot', markerfacecolor='red', markeredgecolor='black', markersize=14),
+        Line2D([0], [0], linestyle='--', color='grey', label='Center-Depot Link', linewidth=1.5),
+        Line2D([0], [0], marker='s', color='w', label='Unassigned', markerfacecolor='lightgrey', markersize=8),
     ]
-    ax.legend(handles=legend_elements, loc="upper right", framealpha=0.9, fontsize=10)
+    ax.legend(handles=legend_elements, loc="upper right", framealpha=0.95, fontsize=11)
 
     plt.tight_layout()
     plt.savefig(out_png, dpi=200)
