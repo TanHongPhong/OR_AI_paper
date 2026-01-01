@@ -1,0 +1,98 @@
+========================================
+    Grid-Grow ALNS Optimizer
+========================================
+Grid dir:    ../end_to_end/grid_out
+Source dir:  ../end_to_end/grid_out
+Out dir:     out
+Seed:        1234567
+Iterations:  1000
+========================================
+
+[1/4] Loading instance...
+[DataLoader] Loaded customer_id_map rows: 1974 (../end_to_end/grid_out/customer_id_map.csv)
+[DataLoader] Loaded depots: 5 (../end_to_end/grid_out/depots_grid_min.csv)
+[DataLoader] Loaded customer tensor: H=2654 W=2624 (occupied sparse cells=1973) (../end_to_end/grid_out/customers_sparse_grid.csv)
+[DataLoader] Linked cells in id_map: 1973
+[DataLoader] No vehicles__Sheet1.csv found at: ../end_to_end/grid_out/vehicles__Sheet1.csv
+[DataLoader] No roads__Sheet1.csv found at: ../end_to_end/grid_out/roads__Sheet1.csv
+      Done in 45 ms
+
+[2/4] Creating initial solution...
+[Init] Solution created. Handing over to ALNS.
+      Done in 1 ms
+      Init: trips=0 served=0 unserved=1973 (0.0%) obj=197304951692.11 (fixed=0.00, travel=0.00, pen=197304951692.11)
+
+[3/4] Running ALNS optimization (1000 iterations)...
+      [ALNS] Starting: obj=197304951692.11 served=0/1973 (0.0%)
+
+========== KPI Report: START ==========
+
+[SeedDebug] START
+
+[KPI-B] Depot Balance:
+===========================================
+      [ALNS] iter=  100 best=197304951692.11 served=0/1973 (  0.0%) T= 15976.2
+      [ALNS] iter=  200 best=197304951692.11 served=0/1973 (  0.0%) T=  5046.3
+      [ALNS] iter=  300 best=197304951692.11 served=0/1973 (  0.0%) T=  1593.9
+      [ALNS] iter=  400 best=197304951692.11 served=0/1973 (  0.0%) T=   503.5
+      [ALNS] iter=  500 best=197304951692.11 served=0/1973 (  0.0%) T=   159.0
+
+========== KPI Report: MIDDLE ==========
+
+[SeedDebug] MIDDLE
+
+[KPI-B] Depot Balance:
+===========================================
+      [ALNS] iter=  600 best=197304951692.11 served=0/1973 (  0.0%) T=    50.2
+      [ALNS] iter=  700 best=197304951692.11 served=0/1973 (  0.0%) T=    15.9
+      [ALNS] iter=  800 best=197304951692.11 served=0/1973 (  0.0%) T=     5.0
+      [ALNS] iter=  900 best=197304951692.11 served=0/1973 (  0.0%) T=     1.6
+      [ALNS] iter= 1000 best=197304951692.11 served=0/1973 (  0.0%) T=     0.5
+
+========== KPI Report: END ==========
+
+[SeedDebug] END
+
+[KPI-B] Depot Balance:
+===========================================
+      [ALNS] Finished: 1000 iters, accepted=1000 (100.0%), improved=0
+      Done in 833 ms
+      Best: trips=0 served=0 unserved=1973 (0.0%) obj=197304951692.11 (fixed=0.00, travel=0.00, pen=197304951692.11)
+
+
+============ PENALTY SUMMARY ============
+
+[HARD CONSTRAINTS] (must be 0)
+  K_d (depot return):     0
+  Duplicate cells:        0
+  Weight capacity:        0
+  Volume capacity:        0
+
+[SOFT CONSTRAINTS]
+  Unserved cells:         1973 -> pen=197304951692.11
+  Max distance viols:     0 -> pen=0.00
+  Depot capacity viols:   0 -> pen=0.00
+
+[TOTALS]
+  Fixed cost:     0.00
+  Travel cost:    0.00
+  Total penalty:  197304951692.11
+  OBJECTIVE:      197304951692.11
+=========================================
+[4/4] Exporting results...
+[Export] Wrote assignments: out/run_20260101_103823/alns_assignment.csv
+[Export] Wrote routes: out/run_20260101_103823/alns_routes.csv
+[Export] Wrote summary: out/run_20260101_103823/alns_summary.csv
+
+========================================
+              RESULTS
+========================================
+Initial:    0/1973 served (0.0%)
+Optimized:  0/1973 served (0.0%)
+Improvement: 0 more served
+Objective:   197304951692.11 -> 197304951692.11
+Center Pen: 197304951692.11
+========================================
+
+[OK] Optimization complete.
+

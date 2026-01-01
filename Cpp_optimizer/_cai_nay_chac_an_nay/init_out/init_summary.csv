@@ -1,0 +1,10 @@
+metric,value
+trips,124
+assigned_cells,1423
+unassigned_cells,550
+serve_rate,0.7212
+total_km,3090.630000
+objective,1000000000000000000.000000
+fixed_cost,0.000000
+travel_cost,0.000000
+penalty,0.000000

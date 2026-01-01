@@ -1,0 +1,1 @@
+vehicle_id,trip_idx,depot_id,center_cell_linear,center_row,center_col,center_customer_id,trip_km,member_cells,load_w,load_v
